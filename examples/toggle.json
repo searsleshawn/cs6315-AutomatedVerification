@@ -1,0 +1,9 @@
+{
+  "name": "ToggleSystem",
+  "states": ["s0", "s1"],
+  "init": "s0",
+  "transitions": {
+    "s0": ["s1"],
+    "s1": ["s0"]
+  }
+}
