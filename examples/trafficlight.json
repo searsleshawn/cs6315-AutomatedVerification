@@ -1,0 +1,11 @@
+{
+  "name": "TrafficLightSystem",
+  "states": ["Green", "Yellow", "Red", "Error"],
+  "init": "Green",
+  "transitions": {
+    "Green": ["Yellow"],
+    "Yellow": ["Red"],
+    "Red": ["Green", "Error"], 
+    "Error": []
+  }
+}
