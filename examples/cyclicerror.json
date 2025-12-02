@@ -1,0 +1,11 @@
+{
+  "name": "CycleWithError",
+  "states": ["A", "B", "C", "Error"],
+  "init": "A",
+  "transitions": {
+    "A": ["B", "Error"],
+    "B": ["C"],
+    "C": ["A"],
+    "Error": ["Error"]
+  }
+}

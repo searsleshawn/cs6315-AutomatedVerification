@@ -1,0 +1,12 @@
+{
+  "name": "DeadEndExample",
+  "states": ["start", "branch1", "branch2", "dead", "goal"],
+  "init": "start",
+  "transitions": {
+    "start": ["branch1", "branch2"],
+    "branch1": ["goal"],
+    "branch2": ["dead"],
+    "dead": [],
+    "goal": ["goal"]
+  }
+}

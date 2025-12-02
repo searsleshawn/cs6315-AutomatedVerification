@@ -5,22 +5,27 @@ def run_bmc(ts, bound: int, target_state: str, safety: bool = False, verbose: bo
     """
     Perform bounded model checking on a transition system.
 
+    Semantics (core solver behavior):
+      - Always checks reachability of `target_state` within the bound.
+      - The `safety` flag DOES NOT change the encoding; it is only for
+        the caller to interpret the result differently (e.g., as a
+        safety violation if `target_state` is 'Error').
+
     Args:
         ts           : TransitionSystem object.
         bound        : Depth limit (k) for unrolling transitions.
-        target_state : State to check reachability or safety against.
-        safety       : If True, checks safety (never reaches 'error');
-                       otherwise checks reachability.
+        target_state : State to check reachability for.
+        safety       : Ignored in encoding; used by caller to interpret SAT/UNSAT.
         verbose      : If True, prints detailed encoding steps for explanation/demo.
 
     Returns:
         (sat_result, trace)
-        sat_result : True if the property holds (or target reachable).
-        trace      : List of visited states (execution path).
+        sat_result : True if there exists a path from init to target_state
+                     within ≤ bound steps; False otherwise.
+        trace      : List of visited states (length bound+1) if SAT, else None.
     """
     solver = BMCSolver()
 
-    # [VERBOSE] Header info
     if verbose:
         print("\n=== Bounded Model Checking Encoding ===")
         print(f"Model: {ts.name}")
@@ -28,79 +33,94 @@ def run_bmc(ts, bound: int, target_state: str, safety: bool = False, verbose: bo
         print(f"Initial State: {ts.init}")
         print(f"States: {ts.states}\n")
 
-    # === Step 1: Encode states ===
-    # Each state s at each time step t ∈ [0..k] becomes a Boolean variable (s_t)
+    # --- Step 1: State variables s_t ---
     states = {(s, t): Bool(f"{s}_{t}") for s in ts.states for t in range(bound + 1)}
 
-    # === Step 2: Initial condition ===
-    # Only the initial state is True at t = 0
-    solver.add(And(states[(ts.init, 0)], *[Not(states[(s, 0)]) for s in ts.states if s != ts.init]))
+    # --- Step 2: Initial condition: exactly init is true at t = 0 ---
+    solver.add(And(
+        states[(ts.init, 0)],
+        *[Not(states[(s, 0)]) for s in ts.states if s != ts.init]
+    ))
 
     if verbose:
         print("Initial condition:")
-        print(f"  {ts.init}_0 = True, others = False\n")
+        print(f"  {ts.init}_0 = True, all other s_0 = False\n")
 
-    # === Step 3: Transition relation ===
+    # --- Step 3: Transition relation + exclusivity for t = 0..bound-1 ---
     for t in range(bound):
         if verbose:
             print(f"--- Step {t} → {t+1} ---")
 
-        # Encode state transitions: if at state s at time t,
-        # then at t+1 one of its successors must be active.
         for s in ts.states:
             next_states = ts.transitions.get(s, [])
             if next_states:
+                # Normal transition: if in s at t, must go to one of its successors at t+1
                 if verbose:
-                    print(f"Transition rule: {s}_{t} → {', '.join(f'{n}_{t+1}' for n in next_states)}")
+                    print(f"Transition rule: {s}_{t} → "
+                          f"{', '.join(f'{n}_{t+1}' for n in next_states)}")
                 solver.add(Implies(
                     states[(s, t)],
                     Or(*[states[(nxt, t + 1)] for nxt in next_states])
                 ))
+            else:
+                # Dead-end: if in s at t, must stay in s at t+1
+                if verbose:
+                    print(f"Dead-end rule: {s}_{t} → {s}_{t+1} (no outgoing transitions)")
+                solver.add(Implies(
+                    states[(s, t)],
+                    states[(s, t + 1)]
+                ))
 
-        # Enforce exclusivity: exactly one state is True at each time step.
+        # Exclusivity at time t: exactly one state is true
         solver.add(Or(*[states[(s, t)] for s in ts.states]))
-        for s1 in ts.states:
-            for s2 in ts.states:
-                if s1 != s2:
-                    solver.add(Or(Not(states[(s1, t)]), Not(states[(s2, t)])))
+        for i, s1 in enumerate(ts.states):
+            for s2 in ts.states[i + 1:]:
+                solver.add(Or(Not(states[(s1, t)]), Not(states[(s2, t)])))
 
         if verbose:
-            print("Exclusivity constraint: exactly one state true per timestep\n")
+            print("Exclusivity constraint at time", t,
+                  ": exactly one state is true\n")
 
-    # === Step 4: Property encoding ===
-    if safety:
-        if verbose:
-            print("\nProperty encoding (Safety mode):")
-            print("Ensure 'error' is False for all t ≤ k\n")
-        bad_state = "Error" if "Error" in ts.states else "error" if "error" in ts.states else target_state
-        goal = Or(*[states[(bad_state, t)] for t in range(bound + 1)])
-        solver.add(goal)
-    else:
-        if verbose:
-            print("\nProperty encoding (Reachability mode):")
-            print(f"Check if '{target_state}' is reachable for any t ≤ {bound}\n")
-        goal = Or(*[states[(target_state, t)] for t in range(bound + 1)])
-        solver.add(goal)
+    # --- Exclusivity at final timestep t = bound ---
+    solver.add(Or(*[states[(s, bound)] for s in ts.states]))
+    for i, s1 in enumerate(ts.states):
+        for s2 in ts.states[i + 1:]:
+            solver.add(Or(Not(states[(s1, bound)]), Not(states[(s2, bound)])))
 
-    # [VERBOSE] End of encoding
+    # --- Step 4: Property encoding: reachability of target_state ---
+    if target_state not in ts.states:
+        # Cannot possibly reach a state that doesn't exist
+        if verbose:
+            print(f"Target state '{target_state}' not in model states → unreachable.\n")
+        return False, None
+
+    if verbose:
+        print("\nProperty encoding (Reachability):")
+        print(f"Check if '{target_state}' is reachable for some t ≤ {bound}\n")
+
+    goal = Or(*[states[(target_state, t)] for t in range(bound + 1)])
+    solver.add(goal)
+
     if verbose:
         print("=== Encoding complete. Sending to Z3 solver... ===\n")
 
-    # === Step 5: Solve and extract result ===
+    # --- Step 5: Solve and extract result ---
     sat_result = solver.check()
 
     if verbose:
         print("Solver result:", "SAT" if sat_result else "UNSAT")
 
-    if sat_result:
-        model = solver.model()
-        trace = extract_trace(states, model, ts, bound)
-        if verbose:
-            print("\nExtracted trace:")
-            print(" → ".join(trace), "\n")
-        return sat_result, trace
-    else:
-        return sat_result, None
+    if not sat_result:
+        return False, None
+
+    model = solver.model()
+    trace = extract_trace(states, model, ts, bound)
+
+    if verbose:
+        print("\nExtracted trace:")
+        print(" → ".join(trace), "\n")
+
+    return True, trace
 
 
 def extract_trace(states, model, ts, bound):
